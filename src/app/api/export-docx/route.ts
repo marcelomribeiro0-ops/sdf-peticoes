@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { htmlToDocxBuffer } from "@/lib/html-to-docx";
+import { gerarDocxComTimbrado } from "@/lib/docx-timbrado";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "Campo 'html' obrigatório." }, { status: 400 });
   }
   try {
-    const buf = await htmlToDocxBuffer(html);
+    const buf = await gerarDocxComTimbrado(html);
     const safeName = (filename || "contestacao").replace(/[^\w\-.]/g, "_");
     return new Response(new Uint8Array(buf), {
       status: 200,
