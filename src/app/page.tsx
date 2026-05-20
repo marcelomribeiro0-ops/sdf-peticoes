@@ -3,6 +3,8 @@
 import { useMemo, useRef, useState } from "react";
 import type { Sugestao } from "@/lib/analyze";
 import type { Tese } from "@/lib/teses";
+import { templateToHtml } from "@/lib/template-to-html";
+import { RichEditor } from "@/components/RichEditor";
 
 type Step = "input" | "sugestoes" | "editor";
 
@@ -23,7 +25,7 @@ export default function Page() {
     caracteres?: number;
   } | null>(null);
   const [teseAtual, setTeseAtual] = useState<Tese | null>(null);
-  const [editorTexto, setEditorTexto] = useState("");
+  const [editorHtml, setEditorHtml] = useState("");
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -31,9 +33,9 @@ export default function Page() {
     const set = new Set<string>();
     const re = /\{\{([A-Z0-9_]+)\}\}/g;
     let m: RegExpExecArray | null;
-    while ((m = re.exec(editorTexto)) !== null) set.add(m[1]);
+    while ((m = re.exec(editorHtml)) !== null) set.add(m[1]);
     return Array.from(set);
-  }, [editorTexto]);
+  }, [editorHtml]);
 
   function selecionarArquivo(f: File | null | undefined) {
     setErro(null);
@@ -90,7 +92,7 @@ export default function Page() {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || "Falha ao carregar tese");
       setTeseAtual(data);
-      setEditorTexto(data.template);
+      setEditorHtml(templateToHtml(data.template));
       setStep("editor");
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Erro");
@@ -99,20 +101,36 @@ export default function Page() {
     }
   }
 
-  function copiarTexto() {
-    navigator.clipboard.writeText(editorTexto);
-  }
-
-  function baixarTxt() {
-    const blob = new Blob([editorTexto], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `contestacao-${teseAtual?.id ?? "peticao"}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+  async function baixarDocx() {
+    setErro(null);
+    setLoading(true);
+    try {
+      const r = await fetch("/api/export-docx", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          html: editorHtml,
+          filename: `contestacao-${teseAtual?.id ?? "peticao"}`,
+        }),
+      });
+      if (!r.ok) {
+        const data = await r.json();
+        throw new Error(data.error || "Falha ao gerar .docx");
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `contestacao-${teseAtual?.id ?? "peticao"}.docx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErro(e instanceof Error ? e.message : "Erro");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function voltar() {
@@ -125,7 +143,7 @@ export default function Page() {
     setSugestoes([]);
     setMetaArquivo(null);
     setTeseAtual(null);
-    setEditorTexto("");
+    setEditorHtml("");
     setErro(null);
     setStep("input");
   }
@@ -301,8 +319,8 @@ export default function Page() {
 
         {step === "editor" && teseAtual && (
           <section className="grid gap-6 lg:grid-cols-[1fr,280px]">
-            <div className="rounded-xl border border-ink-200 bg-white p-4 shadow-sm">
-              <div className="mb-3 flex items-center justify-between">
+            <div className="rounded-xl border border-ink-200 bg-white p-3 shadow-sm">
+              <div className="mb-3 flex items-center justify-between px-1">
                 <div>
                   <h2 className="text-base font-semibold">{teseAtual.nome}</h2>
                   <p className="text-xs text-ink-500">{teseAtual.resumo}</p>
@@ -315,24 +333,15 @@ export default function Page() {
                     ← teses
                   </button>
                   <button
-                    onClick={copiarTexto}
-                    className="rounded-md border border-ink-300 px-3 py-1.5 text-sm hover:bg-ink-100"
+                    onClick={baixarDocx}
+                    disabled={loading}
+                    className="rounded-md bg-ink-900 px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-ink-300"
                   >
-                    Copiar
-                  </button>
-                  <button
-                    onClick={baixarTxt}
-                    className="rounded-md bg-ink-900 px-3 py-1.5 text-sm font-medium text-white"
-                  >
-                    Baixar .txt
+                    {loading ? "Gerando..." : "Baixar .docx"}
                   </button>
                 </div>
               </div>
-              <textarea
-                value={editorTexto}
-                onChange={(e) => setEditorTexto(e.target.value)}
-                className="h-[70vh] w-full resize-y rounded-lg border border-ink-200 bg-ink-50 p-4 font-mono text-[13px] leading-relaxed focus:border-ink-400 focus:bg-white focus:outline-none"
-              />
+              <RichEditor contentHtml={editorHtml} onChange={setEditorHtml} />
             </div>
 
             <aside className="rounded-xl border border-ink-200 bg-white p-4 shadow-sm">
@@ -355,6 +364,10 @@ export default function Page() {
                   </li>
                 ))}
               </ul>
+              <div className="mt-4 rounded-md bg-ink-50 p-3 text-xs text-ink-600">
+                <p className="font-medium text-ink-800">Quando aplicar:</p>
+                <p className="mt-1">{teseAtual.quandoAplicar}</p>
+              </div>
             </aside>
           </section>
         )}

@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { TESES, Tese } from "./teses";
+import { CONTEXTO_ESCRITORIO } from "./contexto-escritorio";
 
 export type Sugestao = {
   teseId: string;
@@ -31,7 +32,7 @@ function mockAnalyze(peticao: string): AnalyzeResult {
           teseId: s.tese.id,
           nome: s.tese.nome,
           confianca: s.confianca,
-          justificativa: `Encontrados ${s.hits} indicador(es) no texto: ${s.tese.palavrasChave
+          justificativa: `Modo mock: encontrados ${s.hits} indicador(es) — ${s.tese.palavrasChave
             .filter((kw) => texto.includes(kw.toLowerCase()))
             .join(", ")}.`,
         }))
@@ -56,32 +57,42 @@ export async function analyzePeticao(
   const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
 
   const catalogo = TESES.map(
-    (t) => `- id: ${t.id}\n  nome: ${t.nome}\n  resumo: ${t.resumo}`,
-  ).join("\n");
+    (t) =>
+      `- id: ${t.id}
+  nome: ${t.nome}
+  resumo: ${t.resumo}
+  quando aplicar: ${t.quandoAplicar}`,
+  ).join("\n\n");
 
-  const prompt = `Você é um assistente jurídico de um escritório brasileiro. O DOCUMENTO abaixo pode ser apenas a petição inicial OU o arquivo único do processo contendo vários documentos. Identifique a petição inicial dentro do material e analise-a para indicar, dentre o CATÁLOGO de teses de contestação disponíveis, quais são as mais aplicáveis ao caso.
+  const systemPrompt = `${CONTEXTO_ESCRITORIO}
 
-CATÁLOGO DE TESES:
+Sua tarefa específica nesta requisição: analisar o documento enviado (que pode ser uma petição inicial isolada OU o arquivo único do processo contendo vários documentos — neste segundo caso, identifique e foque na petição inicial) e indicar, dentre o CATÁLOGO de teses do escritório, quais se aplicam ao caso.
+
+CATÁLOGO DE TESES DISPONÍVEIS:
 ${catalogo}
 
-DOCUMENTO:
+REGRAS DE SAÍDA:
+- Responda APENAS com JSON válido, sem markdown nem crases.
+- Formato: { "sugestoes": [ { "teseId": "<id-do-catalogo>", "confianca": 0.0_a_1.0, "justificativa": "..." } ] }
+- Inclua de 1 a 4 sugestões, ordenadas por confiança decrescente.
+- Use apenas ids que existem no catálogo acima.
+- Na "justificativa" (2-4 frases) cite trechos/fatos concretos da petição (datas, valores, partes, número de apólice/processo) que justificam a aplicação da tese.
+- Se houver indícios de PRESCRIÇÃO, sempre sugira essa tese com alta confiança (é preliminar e prejudica o mérito).
+- Se houver indícios de FRAUDE, sempre sugira essa tese.
+- Múltiplas teses podem ser cumuláveis (ex: prescrição + perda do direito + limite da apólice).`;
+
+  const userPrompt = `DOCUMENTO RECEBIDO:
 """
 ${peticao}
 """
 
-Responda APENAS com um JSON válido no formato:
-{
-  "sugestoes": [
-    { "teseId": "<id-do-catalogo>", "confianca": 0.0_a_1.0, "justificativa": "1-2 frases explicando por que essa tese se aplica a este caso, citando trecho ou fato concreto da petição." }
-  ]
-}
-
-Inclua no máximo 4 sugestões, ordenadas pela confiança (maior primeiro). Use apenas ids que existem no catálogo. Não envolva o JSON em markdown nem em crases.`;
+Analise e retorne o JSON com as sugestões.`;
 
   const resp = await client.messages.create({
     model,
-    max_tokens: 1024,
-    messages: [{ role: "user", content: prompt }],
+    max_tokens: 1500,
+    system: systemPrompt,
+    messages: [{ role: "user", content: userPrompt }],
   });
 
   const textBlock = resp.content.find((b) => b.type === "text");
@@ -89,7 +100,9 @@ Inclua no máximo 4 sugestões, ordenadas pela confiança (maior primeiro). Use 
     return mockAnalyze(peticao);
   }
 
-  let parsed: { sugestoes: Array<{ teseId: string; confianca: number; justificativa: string }> };
+  let parsed: {
+    sugestoes: Array<{ teseId: string; confianca: number; justificativa: string }>;
+  };
   try {
     const cleaned = textBlock.text.trim().replace(/^```json\s*|\s*```$/g, "");
     parsed = JSON.parse(cleaned);
