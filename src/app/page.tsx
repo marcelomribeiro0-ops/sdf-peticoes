@@ -2,11 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import type { Sugestao } from "@/lib/analyze";
+import type { Sugestao, PerguntaConfirmacao } from "@/lib/analyze";
 import type { DadosExtraidos } from "@/lib/montagem";
 import { RichEditor } from "@/components/RichEditor";
 
-type Step = "input" | "sugestoes" | "editor";
+type Step = "input" | "confirmacao" | "sugestoes" | "editor";
+
+type RespostaPergunta = "sim" | "nao" | null;
 
 type TeseLite = {
   id: string;
@@ -36,6 +38,8 @@ export default function Page() {
   const [todasTeses, setTodasTeses] = useState<TeseLite[]>([]);
   const [modo, setModo] = useState<"ia" | "mock" | null>(null);
   const [dados, setDados] = useState<DadosExtraidos>({});
+  const [perguntas, setPerguntas] = useState<PerguntaConfirmacao[]>([]);
+  const [respostas, setRespostas] = useState<RespostaPergunta[]>([]);
   const [metaArquivo, setMetaArquivo] = useState<{
     nome: string | null;
     paginas?: number;
@@ -101,6 +105,9 @@ export default function Page() {
         paginas: data.paginas,
         caracteres: data.caracteres,
       });
+      const perg = (data.perguntas || []) as PerguntaConfirmacao[];
+      setPerguntas(perg);
+      setRespostas(perg.map(() => null));
       // pré-marca todas as sugeridas com confiança >= 0.5
       const pre = new Set<string>(
         (data.sugestoes as Sugestao[])
@@ -108,7 +115,8 @@ export default function Page() {
           .map((s) => s.teseId),
       );
       setSelecionadas(pre);
-      setStep("sugestoes");
+      // Se houver perguntas, força a tela de confirmação primeiro
+      setStep(perg.length > 0 ? "confirmacao" : "sugestoes");
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Erro");
     } finally {
@@ -184,7 +192,8 @@ export default function Page() {
 
   function voltar() {
     if (step === "editor") setStep("sugestoes");
-    else if (step === "sugestoes") setStep("input");
+    else if (step === "sugestoes") setStep(perguntas.length > 0 ? "confirmacao" : "input");
+    else if (step === "confirmacao") setStep("input");
   }
 
   function resetar() {
@@ -193,10 +202,22 @@ export default function Page() {
     setSelecionadas(new Set());
     setMetaArquivo(null);
     setDados({});
+    setPerguntas([]);
+    setRespostas([]);
     setEditorHtml("");
     setErro(null);
     setStep("input");
   }
+
+  function responder(idx: number, resposta: RespostaPergunta) {
+    setRespostas((prev) => {
+      const next = [...prev];
+      next[idx] = resposta;
+      return next;
+    });
+  }
+
+  const todasRespondidas = respostas.every((r) => r !== null);
 
   // Combina sugestões da IA + restante do catálogo (sem duplicar)
   const teseListaCombinada = useMemo(() => {
@@ -221,9 +242,11 @@ export default function Page() {
             <nav className="hidden items-center gap-2 text-xs text-ink-500 md:flex">
               <StepBadge active={step === "input"} label="1. Enviar" />
               <Sep />
-              <StepBadge active={step === "sugestoes"} label="2. Teses" />
+              <StepBadge active={step === "confirmacao"} label="2. Confirmar" />
               <Sep />
-              <StepBadge active={step === "editor"} label="3. Editor" />
+              <StepBadge active={step === "sugestoes"} label="3. Teses" />
+              <Sep />
+              <StepBadge active={step === "editor"} label="4. Editor" />
             </nav>
             <Link
               href="/admin"
@@ -318,6 +341,119 @@ export default function Page() {
                 className="rounded-md bg-ink-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-ink-300"
               >
                 {loading ? "Analisando..." : "Analisar com IA"}
+              </button>
+            </div>
+          </section>
+        )}
+
+        {step === "confirmacao" && (
+          <section>
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold">
+                  Confirme o que a IA leu na petição inicial
+                </h2>
+                <p className="text-sm text-ink-500">
+                  Responda cada item. Isso garante que você leu a inicial e
+                  validou a interpretação da IA antes de seguir.
+                </p>
+              </div>
+              <div className="flex items-center gap-3">
+                {modo === "mock" && (
+                  <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
+                    modo mock
+                  </span>
+                )}
+                <button
+                  onClick={resetar}
+                  className="text-sm text-ink-600 hover:text-ink-900"
+                >
+                  ← novo arquivo
+                </button>
+              </div>
+            </div>
+
+            <ul className="space-y-3">
+              {perguntas.map((p, i) => {
+                const r = respostas[i];
+                const concorda =
+                  r !== null && r === p.respostaSugerida;
+                return (
+                  <li
+                    key={i}
+                    className={`rounded-xl border p-4 shadow-sm ${
+                      r === null
+                        ? "border-ink-200 bg-white"
+                        : concorda
+                          ? "border-emerald-200 bg-emerald-50/50"
+                          : "border-amber-300 bg-amber-50"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1">
+                        <p className="font-medium text-ink-900">
+                          {i + 1}. {p.pergunta}
+                        </p>
+                        {p.trecho && (
+                          <p className="mt-2 border-l-2 border-ink-300 pl-3 text-xs italic text-ink-500">
+                            “{p.trecho}”
+                          </p>
+                        )}
+                        <p className="mt-2 text-[11px] text-ink-400">
+                          IA sugeriu: <span className="font-medium uppercase">{p.respostaSugerida}</span>
+                          {r !== null && !concorda && (
+                            <span className="ml-2 rounded bg-amber-200 px-1.5 py-0.5 text-amber-900">
+                              divergência registrada
+                            </span>
+                          )}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 gap-2">
+                        <button
+                          onClick={() => responder(i, "sim")}
+                          className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                            r === "sim"
+                              ? "bg-emerald-700 text-white"
+                              : "border border-ink-300 text-ink-700 hover:bg-ink-100"
+                          }`}
+                        >
+                          Sim
+                        </button>
+                        <button
+                          onClick={() => responder(i, "nao")}
+                          className={`rounded-md px-3 py-1.5 text-sm font-medium ${
+                            r === "nao"
+                              ? "bg-red-700 text-white"
+                              : "border border-ink-300 text-ink-700 hover:bg-ink-100"
+                          }`}
+                        >
+                          Não
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+
+            <div className="mt-6 flex items-center justify-between">
+              <p className="text-xs text-ink-500">
+                {respostas.filter((r) => r !== null).length} de {perguntas.length} respondida(s).
+                {respostas.filter((r, i) => r !== null && r !== perguntas[i].respostaSugerida).length > 0 && (
+                  <>
+                    {" "}
+                    <span className="font-medium text-amber-800">
+                      {respostas.filter((r, i) => r !== null && r !== perguntas[i].respostaSugerida).length} divergência(s) com a IA.
+                    </span>
+                  </>
+                )}
+              </p>
+              <button
+                onClick={() => setStep("sugestoes")}
+                disabled={!todasRespondidas}
+                className="rounded-md bg-ink-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-ink-300"
+              >
+                Continuar para as teses →
               </button>
             </div>
           </section>

@@ -11,9 +11,16 @@ export type Sugestao = {
   justificativa: string;
 };
 
+export type PerguntaConfirmacao = {
+  pergunta: string;
+  respostaSugerida: "sim" | "nao";
+  trecho?: string;
+};
+
 export type AnalyzeResult = {
   sugestoes: Sugestao[];
   dados: DadosExtraidos;
+  perguntas: PerguntaConfirmacao[];
   modo: "ia" | "mock";
 };
 
@@ -49,7 +56,7 @@ async function mockAnalyze(peticao: string): Promise<AnalyzeResult> {
           justificativa: "Modo mock: nenhum indicador específico encontrado.",
         }));
 
-  return { sugestoes, dados: {}, modo: "mock" };
+  return { sugestoes, dados: {}, perguntas: [], modo: "mock" };
 }
 
 export async function analyzePeticao(peticao: string): Promise<AnalyzeResult> {
@@ -73,7 +80,8 @@ export async function analyzePeticao(peticao: string): Promise<AnalyzeResult> {
 
 IMPORTANTE: você NÃO escreve textos jurídicos. Você APENAS:
 1) extrai metadados do documento (vara, comarca, partes, processo, valores)
-2) classifica quais teses do catálogo do escritório se aplicam ao caso
+2) gera perguntas de confirmação sobre os fatos para o advogado validar
+3) classifica quais teses do catálogo do escritório se aplicam ao caso
 
 O documento abaixo pode ser a petição inicial isolada OU o arquivo único do processo. Identifique a petição inicial dentro do material.
 
@@ -96,6 +104,13 @@ REGRAS DE SAÍDA:
     "naturezaValor": "string ou null (ex: indenização securitária, danos morais)",
     "numeroApolice": "string ou null"
   },
+  "perguntas": [
+    {
+      "pergunta": "Pergunta FECHADA (sim/não) sobre um fato concreto que você identificou. Ex: 'O autor é o LOCADOR do imóvel (e não o locatário)?', 'O autor pede R$ 180.000,00 a título de indenização securitária?', 'O inadimplemento ocorreu em dezembro de 2021?', 'A petição foi ajuizada em março de 2023?'",
+      "respostaSugerida": "sim ou nao",
+      "trecho": "trecho exato da petição inicial que embasa essa pergunta (entre aspas)"
+    }
+  ],
   "sugestoes": [
     {
       "teseId": "<id-do-catalogo>",
@@ -104,6 +119,12 @@ REGRAS DE SAÍDA:
     }
   ]
 }
+
+Sobre as perguntas:
+- Gere de 4 a 8 perguntas FECHADAS (resposta sim ou não).
+- Cubra obrigatoriamente: papel do autor (locador/locatário/imobiliária), valor pretendido, datas relevantes (fato gerador, ajuizamento), número da apólice se houver, e qualquer fato que sustente as teses sugeridas.
+- Cada pergunta deve forçar o advogado a CONFIRMAR sua leitura. Se a resposta for "não", a IA leu errado.
+- Sempre cite o trecho da petição que embasa a pergunta.
 
 - Em "sugestoes" inclua de 1 a 5 teses, ordenadas por confiança decrescente. Pode haver várias cumulativamente (ex: prescrição + perda do direito + limite da apólice).
 - Use apenas ids que existem no catálogo.
@@ -120,7 +141,7 @@ Analise e retorne o JSON conforme as regras.`;
 
   const resp = await client.messages.create({
     model,
-    max_tokens: 2000,
+    max_tokens: 3000,
     system: systemPrompt,
     messages: [{ role: "user", content: userPrompt }],
   });
@@ -132,6 +153,11 @@ Analise e retorne o JSON conforme as regras.`;
 
   let parsed: {
     dados?: Record<string, string | null>;
+    perguntas?: Array<{
+      pergunta: string;
+      respostaSugerida?: string;
+      trecho?: string;
+    }>;
     sugestoes: Array<{ teseId: string; confianca: number; justificativa: string }>;
   };
   try {
@@ -155,6 +181,14 @@ Analise e retorne o JSON conforme as regras.`;
       };
     });
 
+  const perguntas: PerguntaConfirmacao[] = (parsed.perguntas || [])
+    .filter((p) => p.pergunta && p.pergunta.trim())
+    .map((p) => ({
+      pergunta: p.pergunta.trim(),
+      respostaSugerida: p.respostaSugerida === "nao" ? "nao" : "sim",
+      trecho: p.trecho?.trim() || undefined,
+    }));
+
   const d = parsed.dados || {};
   const dados: DadosExtraidos = {
     vara: d.vara || undefined,
@@ -169,5 +203,5 @@ Analise e retorne o JSON conforme as regras.`;
     numeroApolice: d.numeroApolice || undefined,
   };
 
-  return { sugestoes, dados, modo: "ia" };
+  return { sugestoes, dados, perguntas, modo: "ia" };
 }
