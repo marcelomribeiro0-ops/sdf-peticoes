@@ -12,7 +12,10 @@ import PizZip from "pizzip";
  * - Fonte: Calibri Light 12,5pt
  * - Espaçamento entre linhas: 1,5
  * - Alinhamento: justificado
- * - Parágrafos numerados automaticamente quando começam com "N." ou "N.N"
+ * - Parágrafos argumentativos: numeração automática do Word (1, 2, 3...)
+ *   com número na margem esquerda e texto recuado em ~1,5cm (hanging).
+ * - Parágrafos não numerados: endereçamento, qualificação, citações,
+ *   pedidos (alíneas a/b/c) e rodapé.
  */
 
 const TIMBRADO_PATH = path.join(process.cwd(), "assets", "timbrado.docx");
@@ -79,12 +82,8 @@ function parseHtml(html: string): Block[] {
     const inner = m[2];
     if (tag === "p") {
       const runs = parseInline(inner);
-      // Detecta título: parágrafo todo em negrito ou começando com numeração romana
       const allBold = runs.length > 0 && runs.every((r) => r.style.bold);
-      const textoCompleto = runs.map((r) => r.text).join("");
-      const ehTituloRoman =
-        /^[IVXLCDM]+\s*[–\-]\s/.test(textoCompleto.trim()) && allBold;
-      blocks.push({ type: "p", runs, titulo: allBold || ehTituloRoman });
+      blocks.push({ type: "p", runs, titulo: allBold });
     } else if (tag === "h1" || tag === "h2" || tag === "h3") {
       blocks.push({ type: "p", runs: parseInline(inner), titulo: true });
     } else if (tag === "blockquote") {
@@ -106,29 +105,82 @@ function parseHtml(html: string): Block[] {
   return blocks;
 }
 
+/**
+ * Detecta se um parágrafo deve receber auto-numeração do Word.
+ * Exclui: títulos, citações, endereçamento, qualificação, alíneas de
+ * pedidos, rodapé e linhas de assinatura.
+ */
+function shouldAutoNumber(
+  runs: Run[],
+  isTitle: boolean,
+  isQuote: boolean,
+): boolean {
+  if (isTitle || isQuote) return false;
+  const t = runs
+    .map((r) => r.text)
+    .join("")
+    .trim();
+  if (!t) return false;
+  const exemptStarts = [
+    "Excelentíssim",
+    "POTTENCIAL",
+    "Súmula:",
+    "Espécie:",
+    "Processo nº",
+    "Processo:",
+    "Nestes Termos",
+    "Pede-se",
+    "Felipe Bueno",
+    "Marcelo Moreira",
+    "Izabela Cristina",
+    "Clara Villar",
+    "{{CIDADE}}",
+  ];
+  for (const s of exemptStarts) {
+    if (t.startsWith(s)) return false;
+  }
+  if (t.includes("OAB/MG")) return false;
+  // Alíneas dos pedidos (a) b) c)...)
+  if (/^[a-z]\)/.test(t)) return false;
+  // Linha "Cidade, dd de mês de aaaa." do rodapé já preenchida
+  if (/^[A-ZÁ-Ú][\w\sá-úÁ-Ú]+,\s+\d{1,2}\s+de\s+\w+\s+de\s+\d{4}/.test(t))
+    return false;
+  if (t.includes("{{DATA}}")) return false;
+  return true;
+}
+
+/** Remove pattern "N." ou "N.N" do início do primeiro run, se houver. */
+function stripLeadingNumber(runs: Run[]): Run[] {
+  if (runs.length === 0) return runs;
+  const first = runs[0];
+  const m = first.text.match(/^\s*\d+(?:\.\d+)?\.\s+/);
+  if (!m) return runs;
+  return [{ ...first, text: first.text.slice(m[0].length) }, ...runs.slice(1)];
+}
+
+function runProps(style: RunStyle): string {
+  const props: string[] = [
+    `<w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/>`,
+    `<w:sz w:val="25"/>`,
+    `<w:szCs w:val="25"/>`,
+  ];
+  if (style.bold) props.push(`<w:b/>`);
+  if (style.italic) props.push(`<w:i/>`);
+  if (style.underline) props.push(`<w:u w:val="single"/>`);
+  return props.join("");
+}
+
 function runsToXml(runs: Run[]): string {
   return runs
     .map((r) => {
-      const text = r.text;
-      // Quebras de linha viram <w:br/>
-      const parts = text.split("\n");
+      const parts = r.text.split("\n");
       return parts
         .map((part, idx) => {
           let xml = "";
           if (part) {
-            const props: string[] = [
-              `<w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/>`,
-              `<w:sz w:val="25"/>`,
-              `<w:szCs w:val="25"/>`,
-            ];
-            if (r.style.bold) props.push(`<w:b/>`);
-            if (r.style.italic) props.push(`<w:i/>`);
-            if (r.style.underline) props.push(`<w:u w:val="single"/>`);
-            xml += `<w:r><w:rPr>${props.join("")}</w:rPr><w:t xml:space="preserve">${escapeXml(part)}</w:t></w:r>`;
+            xml += `<w:r><w:rPr>${runProps(r.style)}</w:rPr><w:t xml:space="preserve">${escapeXml(part)}</w:t></w:r>`;
           }
-          if (idx < parts.length - 1) {
-            xml += `<w:r><w:br/></w:r>`;
-          }
+          if (idx < parts.length - 1) xml += `<w:r><w:br/></w:r>`;
           return xml;
         })
         .join("");
@@ -136,41 +188,48 @@ function runsToXml(runs: Run[]): string {
     .join("");
 }
 
+type ParagraphOpts = {
+  runs: Run[];
+  titulo?: boolean;
+  citacao?: boolean;
+  numerado?: boolean;
+};
+
 function paragraphXml({
   runs,
   titulo = false,
-  indentLeft,
-  numbering,
-}: {
-  runs: Run[];
-  titulo?: boolean;
-  indentLeft?: number;
-  numbering?: { ref: string; level: number };
-}): string {
+  citacao = false,
+  numerado = false,
+}: ParagraphOpts): string {
+  // Título: centralizado, negrito
+  if (titulo) {
+    const pPr = [
+      `<w:jc w:val="center"/>`,
+      `<w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>`,
+    ].join("");
+    const defaultRunProps = `<w:rPr>${runProps({ bold: true })}</w:rPr>`;
+    return `<w:p><w:pPr>${pPr}${defaultRunProps}</w:pPr>${runsToXml(
+      runs.map((r) => ({ ...r, style: { ...r.style, bold: true } })),
+    )}</w:p>`;
+  }
+
   const props: string[] = [
     `<w:jc w:val="both"/>`,
     `<w:spacing w:before="0" w:after="120" w:line="360" w:lineRule="auto"/>`,
   ];
-  if (indentLeft) {
-    props.push(`<w:ind w:left="${indentLeft}" w:firstLine="0"/>`);
+
+  if (numerado) {
+    props.push(
+      `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="999"/></w:numPr>`,
+    );
+    // O recuo vem da definição da numeração (hanging indent)
+  } else if (citacao) {
+    props.push(`<w:ind w:left="1134" w:firstLine="0"/>`);
   } else {
     props.push(`<w:ind w:firstLine="720"/>`);
   }
-  if (numbering) {
-    props.push(
-      `<w:numPr><w:ilvl w:val="${numbering.level}"/><w:numId w:val="999"/></w:numPr>`,
-    );
-  }
-  // Para títulos, centraliza e remove indentação
-  if (titulo) {
-    const p: string[] = [
-      `<w:jc w:val="center"/>`,
-      `<w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>`,
-    ];
-    const defaultRunProps = `<w:rPr><w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/><w:sz w:val="25"/><w:szCs w:val="25"/><w:b/></w:rPr>`;
-    return `<w:p><w:pPr>${p.join("")}${defaultRunProps}</w:pPr>${runsToXml(runs.map((r) => ({ ...r, style: { ...r.style, bold: true } })))}</w:p>`;
-  }
-  const defaultRunProps = `<w:rPr><w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/><w:sz w:val="25"/><w:szCs w:val="25"/></w:rPr>`;
+
+  const defaultRunProps = `<w:rPr>${runProps({})}</w:rPr>`;
   return `<w:p><w:pPr>${props.join("")}${defaultRunProps}</w:pPr>${runsToXml(runs)}</w:p>`;
 }
 
@@ -179,45 +238,44 @@ function bodyXmlFromHtml(html: string): string {
   const xmls: string[] = [];
   for (const b of blocks) {
     if (b.type === "p") {
-      xmls.push(paragraphXml({ runs: b.runs, titulo: b.titulo }));
+      const numerado = shouldAutoNumber(b.runs, !!b.titulo, false);
+      const runs = numerado ? stripLeadingNumber(b.runs) : b.runs;
+      xmls.push(paragraphXml({ runs, titulo: b.titulo, numerado }));
     } else if (b.type === "quote") {
-      xmls.push(paragraphXml({ runs: b.runs, indentLeft: 1134 }));
+      xmls.push(paragraphXml({ runs: b.runs, citacao: true }));
     } else if (b.type === "list") {
       b.items.forEach((item) => {
-        xmls.push(
-          paragraphXml({ runs: item, numbering: { ref: "default", level: 0 } }),
-        );
+        xmls.push(paragraphXml({ runs: item, numerado: true }));
       });
     }
   }
   return xmls.join("");
 }
 
-/**
- * Substitui o body do document.xml mantendo o <w:sectPr> existente
- * (que referencia o header/footer do timbrado).
- */
 function replaceDocumentBody(originalXml: string, novoBodyXml: string): string {
-  // Captura o sectPr existente (referências de header/footer)
   const sectPrMatch = originalXml.match(/<w:sectPr[\s\S]*?<\/w:sectPr>/);
   const sectPr = sectPrMatch ? sectPrMatch[0] : "";
-
-  // Substitui o conteúdo entre <w:body> e </w:body>
   return originalXml.replace(
     /<w:body>[\s\S]*?<\/w:body>/,
     `<w:body>${novoBodyXml}${sectPr}</w:body>`,
   );
 }
 
-/**
- * Garante que numbering.xml tem uma definição numérica simples para nossas
- * listas ordenadas (numId=999).
- */
 function patchNumberingXml(originalXml: string): string {
   if (originalXml.includes('w:numId="999"')) return originalXml;
-  const abstractNumXml = `<w:abstractNum w:abstractNumId="999"><w:multiLevelType w:val="hybridMultilevel"/><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>`;
+  const abstractNumXml =
+    `<w:abstractNum w:abstractNumId="999">` +
+    `<w:multiLevelType w:val="singleLevel"/>` +
+    `<w:lvl w:ilvl="0">` +
+    `<w:start w:val="1"/>` +
+    `<w:numFmt w:val="decimal"/>` +
+    `<w:lvlText w:val="%1."/>` +
+    `<w:lvlJc w:val="left"/>` +
+    `<w:pPr><w:ind w:left="850" w:hanging="850"/></w:pPr>` +
+    `<w:rPr><w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/><w:sz w:val="25"/></w:rPr>` +
+    `</w:lvl>` +
+    `</w:abstractNum>`;
   const numXml = `<w:num w:numId="999"><w:abstractNumId w:val="999"/></w:num>`;
-  // Insere antes do </w:numbering>
   return originalXml.replace(
     /<\/w:numbering>/,
     `${abstractNumXml}${numXml}</w:numbering>`,
