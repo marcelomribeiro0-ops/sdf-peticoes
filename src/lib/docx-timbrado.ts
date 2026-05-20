@@ -263,15 +263,21 @@ function replaceDocumentBody(originalXml: string, novoBodyXml: string): string {
 
 function patchNumberingXml(originalXml: string): string {
   if (originalXml.includes('w:numId="999"')) return originalXml;
+  // Indent só da primeira linha (onde fica o número). Wrap volta à margem.
+  // w:left=0: lado esquerdo do parágrafo na margem.
+  // w:firstLine=720: a primeira linha começa a 1,27cm da margem — o
+  //   número e o texto inicial ficam recuados, as quebras voltam ao 0.
+  // w:suff=space: separa número e texto com espaço (não tab "gigante").
   const abstractNumXml =
     `<w:abstractNum w:abstractNumId="999">` +
     `<w:multiLevelType w:val="singleLevel"/>` +
     `<w:lvl w:ilvl="0">` +
     `<w:start w:val="1"/>` +
     `<w:numFmt w:val="decimal"/>` +
+    `<w:suff w:val="space"/>` +
     `<w:lvlText w:val="%1."/>` +
     `<w:lvlJc w:val="left"/>` +
-    `<w:pPr><w:ind w:left="850" w:hanging="850"/></w:pPr>` +
+    `<w:pPr><w:ind w:left="0" w:firstLine="720"/></w:pPr>` +
     `<w:rPr><w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/><w:sz w:val="25"/></w:rPr>` +
     `</w:lvl>` +
     `</w:abstractNum>`;

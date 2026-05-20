@@ -177,21 +177,22 @@ export function secoesToHtml(secoes: SecaoMontada[]): string {
       if (s.tipo === "titulo") {
         return `<p><strong>${escapeHtml(s.conteudo)}</strong></p>`;
       }
-      // texto/tese: blocos separados por \n\n viram parágrafos; quebras simples \n viram <br>
-      const blocos = s.conteudo.split(/\n\s*\n/);
-      return blocos
-        .map((b) => {
-          const linhas = b.split("\n").map(escapeHtml);
-          // Se a primeira linha é um "título" curto em maiúsculas (caso da seção da tese)
-          const primeira = linhas[0]?.trim() ?? "";
+      // Cada quebra de linha (\n) vira um parágrafo próprio, evitando que o
+      // Word estique linhas curtas como "Súmula:" / "Processo nº..." ao
+      // aplicar justificação. Linhas vazias são descartadas.
+      const linhas = s.conteudo
+        .split(/\n+/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      return linhas
+        .map((linha, i) => {
+          // Para "tese", a primeira linha é o título da seção argumentativa
           const ehTituloDeTese =
-            s.tipo === "tese" &&
-            blocos.indexOf(b) === 0 &&
-            primeira.length < 150;
+            s.tipo === "tese" && i === 0 && linha.length < 200;
           if (ehTituloDeTese) {
-            return `<p><strong>${linhas.join("<br>")}</strong></p>`;
+            return `<p><strong>${escapeHtml(linha)}</strong></p>`;
           }
-          return `<p>${linhas.join("<br>")}</p>`;
+          return `<p>${escapeHtml(linha)}</p>`;
         })
         .join("");
     })
