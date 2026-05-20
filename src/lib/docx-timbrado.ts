@@ -4,18 +4,19 @@ import path from "node:path";
 import PizZip from "pizzip";
 
 /**
- * Gera um .docx usando o timbrado do escritório (assets/timbrado.docx)
- * como base. Substitui o corpo do documento mantendo cabeçalho, rodapé,
- * imagens e estilos.
+ * Gera um .docx replicando à risca o estilo do modelo do escritório
+ * (assets/timbrado.docx). Substitui o corpo mantendo cabeçalho, rodapé,
+ * imagens e estilos do timbrado.
  *
- * Formatação aplicada a todos os parágrafos do corpo:
- * - Fonte: Calibri Light 12,5pt
- * - Espaçamento entre linhas: 1,5
- * - Alinhamento: justificado
- * - Parágrafos argumentativos: numeração automática do Word (1, 2, 3...)
- *   com número na margem esquerda e texto recuado em ~1,5cm (hanging).
- * - Parágrafos não numerados: endereçamento, qualificação, citações,
- *   pedidos (alíneas a/b/c) e rodapé.
+ * Estilo replicado do modelo de referência:
+ * - Body / endereçamento / qualificação: Calibri Light 12,5pt
+ *   (w:sz=25), espaçamento 1,5 (w:line=360), justificado, SEM indent.
+ * - Títulos de seção: centralizados, negrito, mesma fonte/tamanho.
+ *   Cercados por parágrafo vazio antes e depois.
+ * - Numeração manual: prefixo "N." + <w:tab/> + texto. Sem auto-num.
+ * - Citações (<blockquote>): w:ind left=1134, fonte 11pt (sz=22),
+ *   justificado.
+ * - Alíneas (a/b/c) dos pedidos: w:ind left=720 hanging=360.
  */
 
 const TIMBRADO_PATH = path.join(process.cwd(), "assets", "timbrado.docx");
@@ -105,11 +106,6 @@ function parseHtml(html: string): Block[] {
   return blocks;
 }
 
-/**
- * Detecta se um parágrafo deve receber auto-numeração do Word.
- * Exclui: títulos, citações, endereçamento, qualificação, alíneas de
- * pedidos, rodapé e linhas de assinatura.
- */
 function shouldAutoNumber(
   runs: Run[],
   isTitle: boolean,
@@ -124,7 +120,7 @@ function shouldAutoNumber(
   const exemptStarts = [
     "Excelentíssim",
     "POTTENCIAL",
-    "Súmula:",
+    "Súmula",
     "Espécie:",
     "Processo nº",
     "Processo:",
@@ -140,16 +136,21 @@ function shouldAutoNumber(
     if (t.startsWith(s)) return false;
   }
   if (t.includes("OAB/MG")) return false;
-  // Alíneas dos pedidos (a) b) c)...)
   if (/^[a-z]\)/.test(t)) return false;
-  // Linha "Cidade, dd de mês de aaaa." do rodapé já preenchida
   if (/^[A-ZÁ-Ú][\w\sá-úÁ-Ú]+,\s+\d{1,2}\s+de\s+\w+\s+de\s+\d{4}/.test(t))
     return false;
   if (t.includes("{{DATA}}")) return false;
   return true;
 }
 
-/** Remove pattern "N." ou "N.N" do início do primeiro run, se houver. */
+function isAlinea(runs: Run[]): boolean {
+  const t = runs
+    .map((r) => r.text)
+    .join("")
+    .trim();
+  return /^[a-z]\)/.test(t);
+}
+
 function stripLeadingNumber(runs: Run[]): Run[] {
   if (runs.length === 0) return runs;
   const first = runs[0];
@@ -158,19 +159,20 @@ function stripLeadingNumber(runs: Run[]): Run[] {
   return [{ ...first, text: first.text.slice(m[0].length) }, ...runs.slice(1)];
 }
 
-function runProps(style: RunStyle): string {
+/** Run properties — fonte Calibri Light, tamanho configurável (default 25 = 12.5pt). */
+function runProps(style: RunStyle, sz: number = 25): string {
   const props: string[] = [
     `<w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/>`,
-    `<w:sz w:val="25"/>`,
-    `<w:szCs w:val="25"/>`,
+    `<w:sz w:val="${sz}"/>`,
+    `<w:szCs w:val="${sz}"/>`,
   ];
-  if (style.bold) props.push(`<w:b/>`);
-  if (style.italic) props.push(`<w:i/>`);
+  if (style.bold) props.push(`<w:b/><w:bCs/>`);
+  if (style.italic) props.push(`<w:i/><w:iCs/>`);
   if (style.underline) props.push(`<w:u w:val="single"/>`);
   return props.join("");
 }
 
-function runsToXml(runs: Run[]): string {
+function runsToXml(runs: Run[], sz: number = 25): string {
   return runs
     .map((r) => {
       const parts = r.text.split("\n");
@@ -178,7 +180,7 @@ function runsToXml(runs: Run[]): string {
         .map((part, idx) => {
           let xml = "";
           if (part) {
-            xml += `<w:r><w:rPr>${runProps(r.style)}</w:rPr><w:t xml:space="preserve">${escapeXml(part)}</w:t></w:r>`;
+            xml += `<w:r><w:rPr>${runProps(r.style, sz)}</w:rPr><w:t xml:space="preserve">${escapeXml(part)}</w:t></w:r>`;
           }
           if (idx < parts.length - 1) xml += `<w:r><w:br/></w:r>`;
           return xml;
@@ -188,64 +190,76 @@ function runsToXml(runs: Run[]): string {
     .join("");
 }
 
-type ParagraphOpts = {
-  runs: Run[];
-  titulo?: boolean;
-  citacao?: boolean;
-  numerado?: boolean;
-};
+/** Parágrafo vazio com a formatação padrão do body (usado como espaçador). */
+function emptyParagraphXml(): string {
+  return `<w:p><w:pPr><w:spacing w:line="360" w:lineRule="auto"/><w:jc w:val="both"/><w:rPr>${runProps({})}</w:rPr></w:pPr></w:p>`;
+}
 
-function paragraphXml({
-  runs,
-  titulo = false,
-  citacao = false,
-  numerado = false,
-}: ParagraphOpts): string {
-  // Título: centralizado, negrito
-  if (titulo) {
-    const pPr = [
-      `<w:jc w:val="center"/>`,
-      `<w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>`,
-    ].join("");
-    const defaultRunProps = `<w:rPr>${runProps({ bold: true })}</w:rPr>`;
-    return `<w:p><w:pPr>${pPr}${defaultRunProps}</w:pPr>${runsToXml(
-      runs.map((r) => ({ ...r, style: { ...r.style, bold: true } })),
-    )}</w:p>`;
+function tituloXml(runs: Run[]): string {
+  const pPr = `<w:spacing w:line="360" w:lineRule="auto"/><w:jc w:val="center"/><w:rPr>${runProps({ bold: true })}</w:rPr>`;
+  const runsBold = runs.map((r) => ({ ...r, style: { ...r.style, bold: true } }));
+  return `<w:p><w:pPr>${pPr}</w:pPr>${runsToXml(runsBold)}</w:p>`;
+}
+
+function bodyParagraphXml(
+  runs: Run[],
+  opts: { numero?: number; alinea?: boolean } = {},
+): string {
+  const props: string[] = [];
+  if (opts.alinea) {
+    props.push(`<w:ind w:left="720" w:hanging="360"/>`);
+  }
+  props.push(`<w:spacing w:line="360" w:lineRule="auto"/>`);
+  props.push(`<w:jc w:val="both"/>`);
+  const rPr = `<w:rPr>${runProps({})}</w:rPr>`;
+
+  // Prefixo com "N." + <w:tab/> quando numerado
+  let prefixoXml = "";
+  if (opts.numero !== undefined) {
+    prefixoXml =
+      `<w:r><w:rPr>${runProps({})}</w:rPr><w:t>${opts.numero}.</w:t></w:r>` +
+      `<w:r><w:rPr>${runProps({})}</w:rPr><w:tab/></w:r>`;
   }
 
-  const props: string[] = [
-    `<w:jc w:val="both"/>`,
-    `<w:spacing w:before="0" w:after="120" w:line="360" w:lineRule="auto"/>`,
-  ];
+  return `<w:p><w:pPr>${props.join("")}${rPr}</w:pPr>${prefixoXml}${runsToXml(runs)}</w:p>`;
+}
 
-  if (numerado) {
-    props.push(
-      `<w:numPr><w:ilvl w:val="0"/><w:numId w:val="999"/></w:numPr>`,
-    );
-    // O recuo vem da definição da numeração (hanging indent)
-  } else if (citacao) {
-    props.push(`<w:ind w:left="1134" w:firstLine="0"/>`);
-  } else {
-    props.push(`<w:ind w:firstLine="720"/>`);
-  }
-
-  const defaultRunProps = `<w:rPr>${runProps({})}</w:rPr>`;
-  return `<w:p><w:pPr>${props.join("")}${defaultRunProps}</w:pPr>${runsToXml(runs)}</w:p>`;
+function quoteParagraphXml(runs: Run[]): string {
+  // Citação: indent left 1134, fonte 11pt (sz=22), justificado
+  const pPr = `<w:ind w:left="1134"/><w:spacing w:line="360" w:lineRule="auto"/><w:jc w:val="both"/><w:rPr>${runProps({}, 22)}</w:rPr>`;
+  return `<w:p><w:pPr>${pPr}</w:pPr>${runsToXml(runs, 22)}</w:p>`;
 }
 
 function bodyXmlFromHtml(html: string): string {
   const blocks = parseHtml(html);
   const xmls: string[] = [];
-  for (const b of blocks) {
-    if (b.type === "p") {
-      const numerado = shouldAutoNumber(b.runs, !!b.titulo, false);
-      const runs = numerado ? stripLeadingNumber(b.runs) : b.runs;
-      xmls.push(paragraphXml({ runs, titulo: b.titulo, numerado }));
+  let contador = 0;
+
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.type === "p" && b.titulo) {
+      // Empty antes (se não for o primeiríssimo bloco)
+      if (xmls.length > 0) xmls.push(emptyParagraphXml());
+      xmls.push(tituloXml(b.runs));
+      xmls.push(emptyParagraphXml());
+    } else if (b.type === "p") {
+      const numerar = shouldAutoNumber(b.runs, false, false);
+      const alinea = !numerar && isAlinea(b.runs);
+      const runs = numerar ? stripLeadingNumber(b.runs) : b.runs;
+      if (numerar) {
+        contador += 1;
+        xmls.push(bodyParagraphXml(runs, { numero: contador }));
+      } else if (alinea) {
+        xmls.push(bodyParagraphXml(runs, { alinea: true }));
+      } else {
+        xmls.push(bodyParagraphXml(runs));
+      }
     } else if (b.type === "quote") {
-      xmls.push(paragraphXml({ runs: b.runs, citacao: true }));
+      xmls.push(quoteParagraphXml(b.runs));
     } else if (b.type === "list") {
       b.items.forEach((item) => {
-        xmls.push(paragraphXml({ runs: item, numerado: true }));
+        contador += 1;
+        xmls.push(bodyParagraphXml(item, { numero: contador }));
       });
     }
   }
@@ -261,33 +275,6 @@ function replaceDocumentBody(originalXml: string, novoBodyXml: string): string {
   );
 }
 
-function patchNumberingXml(originalXml: string): string {
-  if (originalXml.includes('w:numId="999"')) return originalXml;
-  // Indent só da primeira linha (onde fica o número). Wrap volta à margem.
-  // w:left=0: lado esquerdo do parágrafo na margem.
-  // w:firstLine=720: a primeira linha começa a 1,27cm da margem — o
-  //   número e o texto inicial ficam recuados, as quebras voltam ao 0.
-  // w:suff=space: separa número e texto com espaço (não tab "gigante").
-  const abstractNumXml =
-    `<w:abstractNum w:abstractNumId="999">` +
-    `<w:multiLevelType w:val="singleLevel"/>` +
-    `<w:lvl w:ilvl="0">` +
-    `<w:start w:val="1"/>` +
-    `<w:numFmt w:val="decimal"/>` +
-    `<w:suff w:val="space"/>` +
-    `<w:lvlText w:val="%1."/>` +
-    `<w:lvlJc w:val="left"/>` +
-    `<w:pPr><w:ind w:left="0" w:firstLine="720"/></w:pPr>` +
-    `<w:rPr><w:rFonts w:ascii="Calibri Light" w:hAnsi="Calibri Light" w:cs="Calibri Light"/><w:sz w:val="25"/></w:rPr>` +
-    `</w:lvl>` +
-    `</w:abstractNum>`;
-  const numXml = `<w:num w:numId="999"><w:abstractNumId w:val="999"/></w:num>`;
-  return originalXml.replace(
-    /<\/w:numbering>/,
-    `${abstractNumXml}${numXml}</w:numbering>`,
-  );
-}
-
 export async function gerarDocxComTimbrado(html: string): Promise<Buffer> {
   const base = await fs.readFile(TIMBRADO_PATH);
   const zip = new PizZip(base);
@@ -296,11 +283,6 @@ export async function gerarDocxComTimbrado(html: string): Promise<Buffer> {
   if (!documentXml) throw new Error("timbrado.docx sem word/document.xml");
   const novoBody = bodyXmlFromHtml(html);
   zip.file("word/document.xml", replaceDocumentBody(documentXml, novoBody));
-
-  const numberingXml = zip.file("word/numbering.xml")?.asText();
-  if (numberingXml) {
-    zip.file("word/numbering.xml", patchNumberingXml(numberingXml));
-  }
 
   return zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
 }
