@@ -59,12 +59,12 @@ export async function analyzePeticao(
     (t) => `- id: ${t.id}\n  nome: ${t.nome}\n  resumo: ${t.resumo}`,
   ).join("\n");
 
-  const prompt = `Você é um assistente jurídico de um escritório brasileiro. Sua tarefa é analisar a PETIÇÃO INICIAL abaixo e indicar, dentre o CATÁLOGO de teses de contestação disponíveis, quais são as mais aplicáveis ao caso.
+  const prompt = `Você é um assistente jurídico de um escritório brasileiro. O DOCUMENTO abaixo pode ser apenas a petição inicial OU o arquivo único do processo contendo vários documentos. Identifique a petição inicial dentro do material e analise-a para indicar, dentre o CATÁLOGO de teses de contestação disponíveis, quais são as mais aplicáveis ao caso.
 
 CATÁLOGO DE TESES:
 ${catalogo}
 
-PETIÇÃO INICIAL:
+DOCUMENTO:
 """
 ${peticao}
 """
