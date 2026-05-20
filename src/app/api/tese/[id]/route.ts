@@ -7,7 +7,7 @@ export async function GET(
   _req: Request,
   { params }: { params: { id: string } },
 ) {
-  const tese = getTeseById(params.id);
+  const tese = await getTeseById(params.id);
   if (!tese) {
     return NextResponse.json({ error: "Tese não encontrada" }, { status: 404 });
   }

@@ -1,14 +1,28 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import type { Sugestao } from "@/lib/analyze";
-import type { Tese } from "@/lib/teses";
-import { templateToHtml } from "@/lib/template-to-html";
+import type { DadosExtraidos } from "@/lib/montagem";
 import { RichEditor } from "@/components/RichEditor";
 
 type Step = "input" | "sugestoes" | "editor";
 
+type TeseLite = {
+  id: string;
+  nome: string;
+  categoria: "preliminar" | "merito" | "subsidiario";
+  resumo: string;
+  quandoAplicar: string;
+};
+
 const ACEITOS = ".pdf,.docx,.txt,.md";
+
+const LABEL_CATEGORIA: Record<TeseLite["categoria"], string> = {
+  preliminar: "Preliminar",
+  merito: "Mérito",
+  subsidiario: "Subsidiário",
+};
 
 export default function Page() {
   const [step, setStep] = useState<Step>("input");
@@ -17,17 +31,28 @@ export default function Page() {
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
+
   const [sugestoes, setSugestoes] = useState<Sugestao[]>([]);
+  const [todasTeses, setTodasTeses] = useState<TeseLite[]>([]);
   const [modo, setModo] = useState<"ia" | "mock" | null>(null);
+  const [dados, setDados] = useState<DadosExtraidos>({});
   const [metaArquivo, setMetaArquivo] = useState<{
     nome: string | null;
     paginas?: number;
     caracteres?: number;
   } | null>(null);
-  const [teseAtual, setTeseAtual] = useState<Tese | null>(null);
+  const [selecionadas, setSelecionadas] = useState<Set<string>>(new Set());
+
   const [editorHtml, setEditorHtml] = useState("");
 
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    fetch("/api/teses")
+      .then((r) => r.json())
+      .then(setTodasTeses)
+      .catch(() => {});
+  }, []);
 
   const placeholders = useMemo(() => {
     const set = new Set<string>();
@@ -69,12 +94,20 @@ export default function Page() {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || "Falha ao analisar");
       setSugestoes(data.sugestoes);
+      setDados(data.dados || {});
       setModo(data.modo);
       setMetaArquivo({
         nome: data.arquivo,
         paginas: data.paginas,
         caracteres: data.caracteres,
       });
+      // pré-marca todas as sugeridas com confiança >= 0.5
+      const pre = new Set<string>(
+        (data.sugestoes as Sugestao[])
+          .filter((s) => s.confianca >= 0.5)
+          .map((s) => s.teseId),
+      );
+      setSelecionadas(pre);
       setStep("sugestoes");
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Erro");
@@ -84,15 +117,31 @@ export default function Page() {
     }
   }
 
-  async function escolherTese(teseId: string) {
+  function toggle(teseId: string) {
+    setSelecionadas((prev) => {
+      const next = new Set(prev);
+      if (next.has(teseId)) next.delete(teseId);
+      else next.add(teseId);
+      return next;
+    });
+  }
+
+  async function montar() {
+    if (selecionadas.size === 0) {
+      setErro("Selecione ao menos uma tese.");
+      return;
+    }
     setErro(null);
     setLoading(true);
     try {
-      const r = await fetch(`/api/tese/${teseId}`);
+      const r = await fetch("/api/montar", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ teseIds: Array.from(selecionadas), dados }),
+      });
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Falha ao carregar tese");
-      setTeseAtual(data);
-      setEditorHtml(templateToHtml(data.template));
+      if (!r.ok) throw new Error(data.error || "Falha ao montar");
+      setEditorHtml(data.html);
       setStep("editor");
     } catch (e) {
       setErro(e instanceof Error ? e.message : "Erro");
@@ -110,7 +159,7 @@ export default function Page() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           html: editorHtml,
-          filename: `contestacao-${teseAtual?.id ?? "peticao"}`,
+          filename: `contestacao-${dados.numeroProcesso ?? "peticao"}`,
         }),
       });
       if (!r.ok) {
@@ -121,7 +170,7 @@ export default function Page() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `contestacao-${teseAtual?.id ?? "peticao"}.docx`;
+      a.download = `contestacao-${dados.numeroProcesso ?? "peticao"}.docx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -141,12 +190,20 @@ export default function Page() {
   function resetar() {
     setArquivo(null);
     setSugestoes([]);
+    setSelecionadas(new Set());
     setMetaArquivo(null);
-    setTeseAtual(null);
+    setDados({});
     setEditorHtml("");
     setErro(null);
     setStep("input");
   }
+
+  // Combina sugestões da IA + restante do catálogo (sem duplicar)
+  const teseListaCombinada = useMemo(() => {
+    const sugByTeseId = new Map(sugestoes.map((s) => [s.teseId, s]));
+    const naoSugeridas = todasTeses.filter((t) => !sugByTeseId.has(t.id));
+    return { sugeridas: sugestoes, outras: naoSugeridas };
+  }, [sugestoes, todasTeses]);
 
   return (
     <main className="min-h-screen">
@@ -160,13 +217,21 @@ export default function Page() {
               Agente de IA — Módulo de Contestação
             </p>
           </div>
-          <nav className="flex items-center gap-2 text-xs text-ink-500">
-            <StepBadge active={step === "input"} label="1. Enviar arquivo" />
-            <Sep />
-            <StepBadge active={step === "sugestoes"} label="2. Teses sugeridas" />
-            <Sep />
-            <StepBadge active={step === "editor"} label="3. Editor" />
-          </nav>
+          <div className="flex items-center gap-4">
+            <nav className="hidden items-center gap-2 text-xs text-ink-500 md:flex">
+              <StepBadge active={step === "input"} label="1. Enviar" />
+              <Sep />
+              <StepBadge active={step === "sugestoes"} label="2. Teses" />
+              <Sep />
+              <StepBadge active={step === "editor"} label="3. Editor" />
+            </nav>
+            <Link
+              href="/admin"
+              className="rounded-md border border-ink-300 px-3 py-1.5 text-xs font-medium text-ink-700 hover:bg-ink-100"
+            >
+              Admin
+            </Link>
+          </div>
         </div>
       </header>
 
@@ -183,7 +248,7 @@ export default function Page() {
               Envie a petição inicial ou o arquivo único do processo
             </h2>
             <p className="mt-1 text-sm text-ink-500">
-              A IA vai ler o documento e sugerir as teses de contestação aplicáveis.
+              A IA vai ler o documento, extrair os dados (vara, partes, processo, valor) e sugerir as teses aplicáveis do banco do escritório.
             </p>
 
             <div
@@ -244,7 +309,8 @@ export default function Page() {
 
             <div className="mt-4 flex items-center justify-between">
               <span className="text-xs text-ink-500">
-                {statusMsg ?? "Aceita PDFs com texto. PDFs digitalizados (imagem) precisam de OCR."}
+                {statusMsg ??
+                  "Aceita PDFs com texto. PDFs digitalizados (imagem) precisam de OCR."}
               </span>
               <button
                 onClick={analisar}
@@ -258,72 +324,117 @@ export default function Page() {
         )}
 
         {step === "sugestoes" && (
-          <section>
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-semibold">Teses sugeridas</h2>
-                <p className="text-sm text-ink-500">
-                  {metaArquivo?.nome && (
-                    <>
-                      Baseado em <span className="font-medium">{metaArquivo.nome}</span>
-                      {metaArquivo.paginas
-                        ? ` · ${metaArquivo.paginas} pág.`
-                        : ""}
-                      {metaArquivo.caracteres
-                        ? ` · ${metaArquivo.caracteres.toLocaleString("pt-BR")} caracteres`
-                        : ""}
-                      . Clique em uma tese para abrir o modelo.
-                    </>
+          <section className="grid gap-6 lg:grid-cols-[1fr,280px]">
+            <div>
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-semibold">
+                    Selecione as teses para montar a contestação
+                  </h2>
+                  <p className="text-sm text-ink-500">
+                    {metaArquivo?.nome && (
+                      <>
+                        Baseado em{" "}
+                        <span className="font-medium">{metaArquivo.nome}</span>
+                        {metaArquivo.paginas ? ` · ${metaArquivo.paginas} pág.` : ""}
+                      </>
+                    )}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3">
+                  {modo === "mock" && (
+                    <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
+                      modo mock
+                    </span>
                   )}
-                </p>
+                  <button
+                    onClick={resetar}
+                    className="text-sm text-ink-600 hover:text-ink-900"
+                  >
+                    ← novo arquivo
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-3">
-                {modo === "mock" && (
-                  <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
-                    modo mock (sem ANTHROPIC_API_KEY)
-                  </span>
+
+              <h3 className="mt-2 text-xs font-semibold uppercase tracking-wide text-ink-500">
+                Sugeridas pela IA
+              </h3>
+              <ul className="mt-2 space-y-2">
+                {teseListaCombinada.sugeridas.length === 0 && (
+                  <li className="rounded-md border border-dashed border-ink-300 bg-ink-50 px-4 py-3 text-sm text-ink-500">
+                    Nenhuma tese sugerida.
+                  </li>
                 )}
-                <button
-                  onClick={resetar}
-                  className="text-sm text-ink-600 hover:text-ink-900"
-                >
-                  ← novo arquivo
-                </button>
-              </div>
+                {teseListaCombinada.sugeridas.map((s) => (
+                  <li key={s.teseId}>
+                    <CardTese
+                      id={s.teseId}
+                      nome={s.nome}
+                      categoria={s.categoria}
+                      justificativa={s.justificativa}
+                      confianca={s.confianca}
+                      selecionada={selecionadas.has(s.teseId)}
+                      onToggle={() => toggle(s.teseId)}
+                    />
+                  </li>
+                ))}
+              </ul>
+
+              {teseListaCombinada.outras.length > 0 && (
+                <>
+                  <h3 className="mt-6 text-xs font-semibold uppercase tracking-wide text-ink-500">
+                    Outras teses disponíveis no banco
+                  </h3>
+                  <ul className="mt-2 space-y-2">
+                    {teseListaCombinada.outras.map((t) => (
+                      <li key={t.id}>
+                        <CardTese
+                          id={t.id}
+                          nome={t.nome}
+                          categoria={t.categoria}
+                          justificativa={t.resumo}
+                          selecionada={selecionadas.has(t.id)}
+                          onToggle={() => toggle(t.id)}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </div>
 
-            <ul className="grid gap-3 md:grid-cols-2">
-              {sugestoes.map((s) => (
-                <li key={s.teseId}>
-                  <button
-                    onClick={() => escolherTese(s.teseId)}
-                    disabled={loading}
-                    className="group h-full w-full rounded-xl border border-ink-200 bg-white p-5 text-left shadow-sm transition hover:border-ink-400 hover:shadow disabled:opacity-60"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <h3 className="font-semibold text-ink-900">{s.nome}</h3>
-                      <ConfidenceBadge value={s.confianca} />
-                    </div>
-                    <p className="mt-2 text-sm text-ink-600">
-                      {s.justificativa}
-                    </p>
-                    <span className="mt-3 inline-block text-xs font-medium text-ink-500 group-hover:text-ink-900">
-                      abrir editor →
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <aside className="rounded-xl border border-ink-200 bg-white p-4 shadow-sm">
+              <h3 className="text-sm font-semibold">Dados extraídos</h3>
+              <p className="mt-1 text-xs text-ink-500">
+                Você pode ajustar agora ou no editor.
+              </p>
+              <CamposDados dados={dados} onChange={setDados} />
+
+              <button
+                onClick={montar}
+                disabled={loading || selecionadas.size === 0}
+                className="mt-4 w-full rounded-md bg-ink-900 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-ink-300"
+              >
+                {loading
+                  ? "Montando..."
+                  : `Montar contestação (${selecionadas.size})`}
+              </button>
+            </aside>
           </section>
         )}
 
-        {step === "editor" && teseAtual && (
+        {step === "editor" && (
           <section className="grid gap-6 lg:grid-cols-[1fr,280px]">
             <div className="rounded-xl border border-ink-200 bg-white p-3 shadow-sm">
               <div className="mb-3 flex items-center justify-between px-1">
                 <div>
-                  <h2 className="text-base font-semibold">{teseAtual.nome}</h2>
-                  <p className="text-xs text-ink-500">{teseAtual.resumo}</p>
+                  <h2 className="text-base font-semibold">
+                    Contestação montada
+                  </h2>
+                  <p className="text-xs text-ink-500">
+                    {selecionadas.size} tese(s) combinada(s). Edite livremente
+                    abaixo.
+                  </p>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -344,35 +455,148 @@ export default function Page() {
               <RichEditor contentHtml={editorHtml} onChange={setEditorHtml} />
             </div>
 
-            <aside className="rounded-xl border border-ink-200 bg-white p-4 shadow-sm">
-              <h3 className="text-sm font-semibold">Placeholders</h3>
-              <p className="mt-1 text-xs text-ink-500">
-                Campos no texto entre <code>{"{{ }}"}</code> que você precisa preencher.
-              </p>
-              <ul className="mt-3 space-y-1.5">
-                {placeholders.length === 0 && (
-                  <li className="text-xs text-ink-400">
-                    Nenhum placeholder restante 🎯
-                  </li>
-                )}
-                {placeholders.map((p) => (
-                  <li
-                    key={p}
-                    className="rounded-md bg-ink-100 px-2.5 py-1 font-mono text-xs text-ink-700"
-                  >
-                    {p}
-                  </li>
-                ))}
-              </ul>
-              <div className="mt-4 rounded-md bg-ink-50 p-3 text-xs text-ink-600">
-                <p className="font-medium text-ink-800">Quando aplicar:</p>
-                <p className="mt-1">{teseAtual.quandoAplicar}</p>
+            <aside className="space-y-4">
+              <div className="rounded-xl border border-ink-200 bg-white p-4 shadow-sm">
+                <h3 className="text-sm font-semibold">Placeholders restantes</h3>
+                <p className="mt-1 text-xs text-ink-500">
+                  Campos entre <code>{"{{ }}"}</code> que ainda precisam ser preenchidos.
+                </p>
+                <ul className="mt-3 space-y-1.5">
+                  {placeholders.length === 0 && (
+                    <li className="text-xs text-ink-400">
+                      Nenhum placeholder restante 🎯
+                    </li>
+                  )}
+                  {placeholders.map((p) => (
+                    <li
+                      key={p}
+                      className="rounded-md bg-ink-100 px-2.5 py-1 font-mono text-xs text-ink-700"
+                    >
+                      {p}
+                    </li>
+                  ))}
+                </ul>
               </div>
             </aside>
           </section>
         )}
       </div>
     </main>
+  );
+}
+
+function CardTese({
+  id,
+  nome,
+  categoria,
+  justificativa,
+  confianca,
+  selecionada,
+  onToggle,
+}: {
+  id: string;
+  nome: string;
+  categoria: TeseLite["categoria"];
+  justificativa: string;
+  confianca?: number;
+  selecionada: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <label
+      htmlFor={`tese-${id}`}
+      className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 shadow-sm transition ${
+        selecionada
+          ? "border-ink-700 bg-ink-50 ring-1 ring-ink-700"
+          : "border-ink-200 bg-white hover:border-ink-400"
+      }`}
+    >
+      <input
+        id={`tese-${id}`}
+        type="checkbox"
+        checked={selecionada}
+        onChange={onToggle}
+        className="mt-1 h-4 w-4 cursor-pointer accent-ink-900"
+      />
+      <div className="flex-1">
+        <div className="flex items-center gap-2">
+          <h4 className="font-semibold text-ink-900">{nome}</h4>
+          <CategoriaBadge categoria={categoria} />
+          {confianca !== undefined && <ConfidenceBadge value={confianca} />}
+        </div>
+        <p className="mt-1 text-sm text-ink-600">{justificativa}</p>
+      </div>
+    </label>
+  );
+}
+
+function CategoriaBadge({ categoria }: { categoria: TeseLite["categoria"] }) {
+  const tone =
+    categoria === "preliminar"
+      ? "bg-violet-100 text-violet-800"
+      : categoria === "merito"
+        ? "bg-sky-100 text-sky-800"
+        : "bg-ink-100 text-ink-700";
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tone}`}>
+      {LABEL_CATEGORIA[categoria]}
+    </span>
+  );
+}
+
+function ConfidenceBadge({ value }: { value: number }) {
+  const pct = Math.round(value * 100);
+  const tone =
+    pct >= 70
+      ? "bg-emerald-100 text-emerald-800"
+      : pct >= 40
+        ? "bg-amber-100 text-amber-800"
+        : "bg-ink-100 text-ink-700";
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>
+      {pct}%
+    </span>
+  );
+}
+
+function CamposDados({
+  dados,
+  onChange,
+}: {
+  dados: DadosExtraidos;
+  onChange: (d: DadosExtraidos) => void;
+}) {
+  const set = (k: keyof DadosExtraidos) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    onChange({ ...dados, [k]: e.target.value });
+  const Input = ({
+    label,
+    field,
+  }: {
+    label: string;
+    field: keyof DadosExtraidos;
+  }) => (
+    <label className="block text-xs">
+      <span className="text-ink-600">{label}</span>
+      <input
+        value={dados[field] ?? ""}
+        onChange={set(field)}
+        className="mt-0.5 w-full rounded-md border border-ink-200 bg-white px-2 py-1 text-sm focus:border-ink-400 focus:outline-none"
+      />
+    </label>
+  );
+  return (
+    <div className="mt-3 space-y-2">
+      <Input label="Vara" field="vara" />
+      <div className="grid grid-cols-[1fr,80px] gap-2">
+        <Input label="Comarca" field="comarca" />
+        <Input label="UF" field="uf" />
+      </div>
+      <Input label="Nº do processo" field="numeroProcesso" />
+      <Input label="Autor" field="nomeAutor" />
+      <Input label="Tipo da ação" field="tipoAcao" />
+      <Input label="Valor pretendido" field="valorPretendido" />
+      <Input label="Nº da apólice" field="numeroApolice" />
+    </div>
   );
 }
 
@@ -392,21 +616,6 @@ function StepBadge({ active, label }: { active: boolean; label: string }) {
 
 function Sep() {
   return <span className="text-ink-300">›</span>;
-}
-
-function ConfidenceBadge({ value }: { value: number }) {
-  const pct = Math.round(value * 100);
-  const tone =
-    pct >= 70
-      ? "bg-emerald-100 text-emerald-800"
-      : pct >= 40
-        ? "bg-amber-100 text-amber-800"
-        : "bg-ink-100 text-ink-700";
-  return (
-    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}>
-      {pct}%
-    </span>
-  );
 }
 
 function UploadIcon() {

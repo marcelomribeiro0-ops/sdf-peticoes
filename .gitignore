@@ -9,3 +9,5 @@ dist
 .DS_Store
 .vercel
 next-env.d.ts
+# Persistência local — em produção fica no disco do Hostinger; em dev cada um tem o seu
+data/
